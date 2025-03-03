@@ -1,0 +1,95 @@
+from DobotEDU import *
+import cv2
+import numpy as np
+from paddleocr import PaddleOCR
+import time
+
+def rotate_dobot(angles):
+    for angle in angles:
+        magician.set_r(r=angle)
+        time.sleep(1)
+
+def find_working_camera():
+    for i in range(5):
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            print(f"Camera found at index {i}")
+            cap.release()
+            return i
+        cap.release()
+    print("No accessible camera found!")
+    return None
+
+def detect_text(frame, ocr):
+    img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = ocr.ocr(img_rgb, cls=True)
+    detected_texts = []
+    if results and isinstance(results, list):
+        for result in results:
+            if result:
+                for line in result:
+                    if line:
+                        box, (text, confidence) = line[0], line[1]
+                        detected_texts.append(text)
+                        pts = np.array(box, dtype=np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(frame, [cv2.convexHull(pts)], isClosed=True, color=(0, 255, 0), thickness=2)
+                        cv2.putText(frame, f"{text} ({confidence:.2f})", tuple(pts[0][0]),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+    return detected_texts
+
+def detect_colors(frame):
+    hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    color_ranges = {
+        "Red": [(np.array([0, 120, 70]), np.array([10, 255, 255])),
+                (np.array([170, 120, 70]), np.array([180, 255, 255]))],
+        "Blue": [(np.array([100, 150, 0]), np.array([140, 255, 255]))],
+        "Yellow": [(np.array([20, 100, 100]), np.array([30, 255, 255]))]
+    }
+    colors_bgr = {"Red": (0, 0, 255), "Blue": (255, 0, 0), "Yellow": (0, 255, 255)}
+    detected_colors = []
+    for color, ranges in color_ranges.items():
+        mask = sum(cv2.inRange(hsv_frame, lower, upper) for lower, upper in ranges)
+        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            if cv2.contourArea(cnt) > 500:
+                x, y, w, h = cv2.boundingRect(cnt)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), colors_bgr[color], 2)
+                cv2.putText(frame, color, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors_bgr[color], 2)
+                if color not in detected_colors:
+                    detected_colors.append(color)
+    return detected_colors
+
+def process_frame(cap, ocr):
+    ret, frame = cap.read()
+    if not ret:
+        print("Error: Couldn't capture frame from the camera.")
+        return [], []
+    detected_texts = detect_text(frame, ocr)
+    detected_colors = detect_colors(frame)
+    cv2.imshow("OCR and Color Detection", frame)
+    return detected_texts, detected_colors
+
+# Initialize the camera, OCR, and DobotEDU's Magician
+camera_index = find_working_camera()
+if camera_index is None:
+    exit("No camera detected. Exiting script.")
+
+cap = cv2.VideoCapture(camera_index)
+if not cap.isOpened():
+    exit("Failed to open the camera.")
+
+ocr = PaddleOCR(use_angle_cls=True, lang='en')
+
+rotation_sequence = [0, 90, 136, 0, -90, -100]
+for angle in rotation_sequence:
+    rotate_dobot([angle])
+    detected_texts, detected_colors = process_frame(cap, ocr)
+    if "DXB" in detected_texts and "Blue" in detected_colors:
+        print("Detected DXB and Blue! Moving Dobot...")
+        magician.set_ptpwithl_cmd(mode=1, x=17.51, y=-213.6, z=23.08, r=-85.31, l=50)
+        magician.set_r(r=0)
+        magician.set_endeffector_suctioncup(enable=True, on=False)
+    else:
+        magician.set_endeffector_suctioncup(enable=True, on=True)
+cap.release()
+cv2.destroyAllWindows()
